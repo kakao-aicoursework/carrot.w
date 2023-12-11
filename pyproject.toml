@@ -11,6 +11,8 @@ openai = "0.28"
 pandas = "^2.1.3"
 aiohttp = "^3.9.1"
 direnv = "^2020.12.3"
+langchain = "^0.0.348"
+jupyter = "^1.0.0"
 
 
 [build-system]
