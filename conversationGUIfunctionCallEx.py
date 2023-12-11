@@ -7,32 +7,12 @@ import openai
 import tkinter as tk
 import pandas as pd
 from tkinter import scrolledtext
-import tkinter.filedialog as filedialog
+
+
+from pandas import DataFrame
 
 openai.api_key = os.getenv('OPENAI_API_KEY', '')
-
-# response에 CSV 형식이 있는지 확인하고 있으면 저장하기
-def save_to_csv(df, file_name):
-    file_path= f"./data/{file_name}.csv"
-    df.to_csv(file_path, sep=';', index=False, lineterminator='\n')
-    return f'파일을 저장했습니다. 저장 경로는 다음과 같습니다. \n {file_path}\n'
-
-
-
-def preprocess_raw_text_to_csv(text: str, file_name: str="project_data_카카오톡채널"):
-    if ";" in text:
-        lines = text.strip().split("\n")
-        csv_data = []
-
-        for line in lines:
-            if ";" in line:
-                csv_data.append(line.split(";"))
-
-        if len(csv_data) > 0:
-            df = pd.DataFrame(csv_data[1:], columns=csv_data[0])
-            return save_to_csv(df, file_name)
-
-    return f'저장에 실패했습니다. \n저장에 실패한 내용은 다음과 같습니다. \n{text}'
+pd.set_option('display.max_columns', None)
 
 
 def append_to_csv(row: List[str], file_name: str, header: List[str]):
@@ -47,12 +27,14 @@ def append_to_csv(row: List[str], file_name: str, header: List[str]):
 
 
 def extract_keywords(keywords: str, original_text: str, file_to_save: str):
-    print(keywords)
     _HEADERS=["keywords", "text"]
     append_to_csv([keywords, original_text], file_to_save, _HEADERS)
     return
 
-def send_message(message_log, functions, gpt_model="gpt-4-1106-preview", temperature=0.1):
+def find_most_similar_rows(row_index: int, df: DataFrame):
+    return df.iloc[[row_index]]["text"].item()
+
+def send_message(message_log, functions, gpt_model="gpt-4-1106-preview", temperature=0.1, default_value ={}):
     response = openai.ChatCompletion.create(
         model=gpt_model,
         messages=message_log,
@@ -65,31 +47,14 @@ def send_message(message_log, functions, gpt_model="gpt-4-1106-preview", tempera
     response_message = response["choices"][0]["message"]
 
     if response_message.get("function_call"):
-        available_functions = {
-            "preprocess_raw_text_to_csv": preprocess_raw_text_to_csv,
-        }
         function_name = response_message["function_call"]["name"]
-        fuction_to_call = available_functions[function_name]
+        function_to_call = globals().get(function_name)
         function_args = json.loads(response_message["function_call"]["arguments"])
+        function_args.update(default_value)
         # 사용하는 함수에 따라 사용하는 인자의 개수와 내용이 달라질 수 있으므로
         # **function_args로 처리하기
-        function_response = fuction_to_call(**function_args)
-
-        # 함수를 실행한 결과를 GPT에게 보내 답을 받아오기 위한 부분
-        message_log.append(response_message)  # GPT의 지난 답변을 message_logs에 추가하기
-        message_log.append(
-            {
-                "role": "function",
-                "name": function_name,
-                "content": function_response,
-            }
-        )  # 함수 실행 결과도 GPT messages에 추가하기
-        response = openai.ChatCompletion.create(
-            model=gpt_model,
-            messages=message_log,
-            temperature=temperature,
-        )  # 함수 실행 결과를 GPT에 보내 새로운 답변 받아오기
-    return response.choices[0].message.content
+        function_response = function_to_call(**function_args)
+    return function_response
 
 def read_text_file(file_path):
     with open(file_path, 'r') as file:
@@ -149,31 +114,41 @@ def preprocess(file_path):
             extract_keywords(keywords, paragraph.strip(), csv_file_name)
 
 
+
 def main():
-    preprocess("./data/project_data_카카오톡채널.txt")
+    # Do preprocess only once.
+    original_text_file = "./data/project_data_카카오톡채널.txt"
+    # preprocess("./data/project_data_카카오톡채널.txt")
+
+    preprocessed_file = "./data/project_data_카카오톡채널.csv"
+    df = pd.read_csv(preprocessed_file)
+
+    # make system prompt
+    keywords_list = ""
+    for idx, keywords in enumerate(df['keywords']):
+        keywords_list += f"- row {idx}: {keywords}\n"
+
     message_log = [
         {
             "role": "system",
-            "content": '''
-            You are a DJ assistant who creates playlists. Your user will be Korean, so communicate in Korean, but you must not translate artists' names and song titles into Korean.
-                - At first, suggest songs to make a playlist based on users' request. The playlist must contains the title, artist, and release year of each song in a list format. You must ask the user if they want to save the playlist as follow: "이 플레이리스트를 CSV로 저장하시겠습니까?"
-            '''
+            "content": f"Find the number of row which has most similar keywords with user query from the keyword list.\n" + keywords_list
+
         }
     ]
 
     functions = [
         {
-            "name": "save_playlist_as_csv",
-            "description": "Saves the given playlist data into a CSV file when the user confirms the playlist.",
+            "name": "find_most_similar_rows",
+            "description": "Get the most similar rows using row index.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "playlist_csv": {
-                        "type": "string",
-                        "description": "A playlist in CSV format separated by ';'. It must contains a header and the release year should follow the 'YYYY' format. The CSV content must starts with a new line. The header of the CSV file must be in English and it should be formatted as follows: 'Title;Artist;Released'.",
+                    "row_index": {
+                        "type": "integer",
+                        "description": "Index of row which have the most similar meaning.",
                     },
                 },
-                "required": ["playlist_csv"],
+                "required": ["row_index"],
             },
         }
     ]
@@ -215,17 +190,16 @@ def main():
         if user_input.lower() == "quit":
             window.destroy()
             return
-
-        message_log.append({"role": "user", "content": user_input})
+        message_log.append({"role": "user", "content": f"- user query: {user_input}"})
         conversation.config(state=tk.NORMAL)  # 이동
         conversation.insert(tk.END, f"You: {user_input}\n", "user")  # 이동
         thinking_popup = show_popup_message(window, "처리중...")
         window.update_idletasks()
         # '생각 중...' 팝업 창이 반드시 화면에 나타나도록 강제로 설정하기
-        response = send_message(message_log, functions)
+        response = send_message(message_log, functions, default_value=dict(df=df))
         thinking_popup.destroy()
 
-        message_log.append({"role": "assistant", "content": response})
+        # message_log.append({"role": "assistant", "content": response})
 
         # 태그를 추가한 부분(1)
         conversation.insert(tk.END, f"gpt assistant: {response}\n", "assistant")
@@ -238,7 +212,7 @@ def main():
 
     font = ("맑은 고딕", 10)
 
-    conversation = scrolledtext.ScrolledText(window, wrap=tk.WORD, bg='#f0f0f0', font=font)
+    conversation = scrolledtext.ScrolledText(window, wrap=tk.WORD, bg='#f0f0f0', font=font, fg='black')
     # width, height를 없애고 배경색 지정하기(2)
     conversation.tag_configure("user", background="#c9daf8")
     # 태그별로 다르게 배경색 지정하기(3)
