@@ -1,6 +1,7 @@
-
+import csv
 import json
 import os
+from typing import List
 
 import openai
 import tkinter as tk
@@ -11,17 +12,16 @@ import tkinter.filedialog as filedialog
 openai.api_key = os.getenv('OPENAI_API_KEY', '')
 
 # response에 CSV 형식이 있는지 확인하고 있으면 저장하기
-def save_to_csv(df):
-    file_path = filedialog.asksaveasfilename(defaultextension='.csv')
-    if file_path:
-        df.to_csv(file_path, sep=';', index=False, lineterminator='\n')
-        return f'파일을 저장했습니다. 저장 경로는 다음과 같습니다. \n {file_path}\n'
-    return '저장을 취소했습니다'
+def save_to_csv(df, file_name):
+    file_path= f"./data/{file_name}.csv"
+    df.to_csv(file_path, sep=';', index=False, lineterminator='\n')
+    return f'파일을 저장했습니다. 저장 경로는 다음과 같습니다. \n {file_path}\n'
 
 
-def save_playlist_as_csv(playlist_csv):
-    if ";" in playlist_csv:
-        lines = playlist_csv.strip().split("\n")
+
+def preprocess_raw_text_to_csv(text: str, file_name: str="project_data_카카오톡채널"):
+    if ";" in text:
+        lines = text.strip().split("\n")
         csv_data = []
 
         for line in lines:
@@ -30,25 +30,43 @@ def save_playlist_as_csv(playlist_csv):
 
         if len(csv_data) > 0:
             df = pd.DataFrame(csv_data[1:], columns=csv_data[0])
-            return save_to_csv(df)
+            return save_to_csv(df, file_name)
 
-    return f'저장에 실패했습니다. \n저장에 실패한 내용은 다음과 같습니다. \n{playlist_csv}'
+    return f'저장에 실패했습니다. \n저장에 실패한 내용은 다음과 같습니다. \n{text}'
 
 
-def send_message(message_log, functions, gpt_model="gpt-3.5-turbo", temperature=0.1):
+def append_to_csv(row: List[str], file_name: str, header: List[str]):
+    file_exists = os.path.isfile(file_name)
+
+    with open(file_name, 'a') as f_object:
+        writer = csv.writer(f_object)
+
+        if not file_exists:
+            writer.writerow(header)
+        writer.writerow(row)
+
+
+def extract_keywords(keywords: str, original_text: str, file_to_save: str):
+    print(keywords)
+    _HEADERS=["keywords", "text"]
+    append_to_csv([keywords, original_text], file_to_save, _HEADERS)
+    return
+
+def send_message(message_log, functions, gpt_model="gpt-4-1106-preview", temperature=0.1):
     response = openai.ChatCompletion.create(
         model=gpt_model,
         messages=message_log,
         temperature=temperature,
         functions=functions,
         function_call='auto',
+        max_tokens=4096,
     )
 
     response_message = response["choices"][0]["message"]
 
     if response_message.get("function_call"):
         available_functions = {
-            "save_playlist_as_csv": save_playlist_as_csv,
+            "preprocess_raw_text_to_csv": preprocess_raw_text_to_csv,
         }
         function_name = response_message["function_call"]["name"]
         fuction_to_call = available_functions[function_name]
@@ -73,8 +91,66 @@ def send_message(message_log, functions, gpt_model="gpt-3.5-turbo", temperature=
         )  # 함수 실행 결과를 GPT에 보내 새로운 답변 받아오기
     return response.choices[0].message.content
 
+def read_text_file(file_path):
+    with open(file_path, 'r') as file:
+        # Read the entire content of the file
+        content = file.read()
+        return content
+
+
+def preprocess(file_path):
+    # preprocess data into tabular data.
+    system_prompt = {
+            "role": "system",
+            "content": "Extract 3-5 main keywords from the text.\n"
+    }
+
+    functions = [
+        {
+            "name": "extract_keywords",
+            "description": "Parse 3-5 keywords from given keywords.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keywords":
+                        {
+                            "type": "string",
+                            "description": "Parse 3-5 multiple keywords from the text. Keywords are separated by comma.",
+                        }
+
+                },
+                "required": ["keywords"]
+            }
+        }
+    ]
+
+    content = read_text_file(file_path)
+    csv_file_name = file_path.replace(".txt", ".csv")
+    paragrphs = content.split("##")
+    for paragraph in paragrphs[1:]:
+        print(paragraph.strip())
+        user_prompt ={
+            "role": "user",
+            "content": f"{paragraph.strip()}\n."
+        }
+
+        response = openai.ChatCompletion.create(
+            model="gpt-4-1106-preview",
+            messages=[system_prompt, user_prompt],
+            temperature=0.2,
+            functions=functions,
+            function_call="auto",
+            max_tokens=4096,
+        )
+
+        function_call_response = response["choices"][0]["message"].get("function_call", {})
+        if function_call_response.get("name") == "extract_keywords":
+            keywords = json.loads(function_call_response["arguments"])["keywords"]
+            extract_keywords(keywords, paragraph.strip(), csv_file_name)
+
 
 def main():
+    preprocess("./data/project_data_카카오톡채널.txt")
     message_log = [
         {
             "role": "system",
